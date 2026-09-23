@@ -1,0 +1,14 @@
+C:\Lexus200t\LexusSonarControl\bin\x86\Release\net10.0\LexusSonarControl.exe
+C:\Lexus200t\LexusSonarControl\bin\x86\Release\net10.0\LexusSonarControl.deps.json
+C:\Lexus200t\LexusSonarControl\bin\x86\Release\net10.0\LexusSonarControl.runtimeconfig.json
+C:\Lexus200t\LexusSonarControl\bin\x86\Release\net10.0\LexusSonarControl.dll
+C:\Lexus200t\LexusSonarControl\bin\x86\Release\net10.0\LexusSonarControl.pdb
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.GeneratedMSBuildEditorConfig.editorconfig
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.AssemblyInfoInputs.cache
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.AssemblyInfo.cs
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.csproj.CoreCompileInputs.cache
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.dll
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\refint\LexusSonarControl.dll
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.pdb
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\LexusSonarControl.genruntimeconfig.cache
+C:\Lexus200t\LexusSonarControl\obj\x86\Release\net10.0\ref\LexusSonarControl.dll
