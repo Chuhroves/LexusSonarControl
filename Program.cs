@@ -1,7 +1,8 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Win32;
 
 class Program
@@ -63,34 +64,50 @@ class Program
 
     #endregion
 
+    private static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
+
     static void Main(string[] args)
     {
-        Console.WriteLine("=== Lexus RX 200t Sonar Control (Universal J2534) ===");
+        AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+        {
+            Exception ex = e.ExceptionObject as Exception;
+            string fatalError = $"[КРИТИЧЕСКАЯ ОШИБКА СИСТЕМЫ] {ex?.ToString() ?? e.ExceptionObject.ToString()}";
+            Log(fatalError, isError: true);
+            Console.WriteLine("\nПриложение завершило работу с ошибкой. Нажмите Enter для выхода...");
+            Console.ReadLine();
+        };
 
-        J2534DeviceInfo device = null;
+        Log("=== Запуск приложения Lexus RX 200t Sonar Control ===");
+        Log($"Путь запуска: {AppDomain.CurrentDomain.BaseDirectory}");
+        Log($"Платформа (x86/x64): {(Environment.Is64BitProcess ? "x64" : "x86")}");
 
         try
         {
-            // 1. Поиск адаптера CHIPSOFT (или любого доступного J2534) в реестре
-            device = FindJ2534Device("CHIPSOFT");
-
-            Console.WriteLine($"[+] Найден адаптер: \"{device.Name}\"");
-            Console.WriteLine($"[+] Путь к DLL: \"{device.DllPath}\"");
+            RunApp();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[-] Ошибка поиска в реестре: {ex.Message}");
+            Log($"[-] Исключение: {ex.Message}", isError: true);
+            if (ex.InnerException != null)
+            {
+                Log($"[-] Внутреннее исключение: {ex.InnerException.Message}", isError: true);
+            }
+            Console.WriteLine("\nРабота завершена с ошибкой. Нажмите Enter для выхода...");
             Console.ReadLine();
-            return;
         }
+    }
 
-        // 2. Загрузка найденной DLL
+    private static void RunApp()
+    {
+        J2534DeviceInfo device = FindJ2534Device("CHIPSOFT");
+        Log($"[+] Найден адаптер в реестре: \"{device.Name}\"");
+        Log($"[+] Путь к DLL: \"{device.DllPath}\"");
+
         IntPtr hModule = LoadLibrary(device.DllPath);
         if (hModule == IntPtr.Zero)
         {
-            int err = Marshal.GetLastWin32Error();
-            Console.WriteLine($"[-] Не удалось загрузить DLL {device.DllPath}. Win32 Error: {err}");
-            Console.ReadLine();
+            int winErr = Marshal.GetLastWin32Error();
+            Log($"[-] Не удалось загрузить DLL. Win32 Error: {winErr}", isError: true);
             return;
         }
 
@@ -109,61 +126,182 @@ class Program
 
         try
         {
-            // 3. Открываем устройство с передачей имени из реестра
             int status = PassThruOpen(device.Name, out deviceId);
-
-            // Если не открылось по точному имени, делаем фоллбэк с передачей null
             if (status != 0)
             {
+                Log($"[*] Попытка открыть с передачей null в pName...", isError: false);
                 status = PassThruOpen(null, out deviceId);
             }
 
             CheckStatus(status, "PassThruOpen");
-            Console.WriteLine($"[+] Адаптер успешно открыт! Device ID: {deviceId}");
+            Log($"[+] Адаптер успешно открыт. Device ID: {deviceId}");
 
-            // 4. Подключение к HS-CAN (500 kbps)
             status = PassThruConnect(deviceId, CAN_PROTOCOL, 0, 500000, out channelId);
             CheckStatus(status, "PassThruConnect");
-            Console.WriteLine($"[+] Подключено к HS-CAN (500 kbps). Channel ID: {channelId}");
+            Log($"[+] Подключено к HS-CAN (500 kbps). Channel ID: {channelId}");
 
-            // 5. Установка базового фильтра
+            // Настройка базового фильтра
             PASSTHRU_MSG mask = CreateCanMsg(0x000, new byte[8]);
             PASSTHRU_MSG pattern = CreateCanMsg(0x000, new byte[8]);
             PassThruStartMsgFilter(channelId, PASS_FILTER, ref mask, ref pattern, IntPtr.Zero, out filterId);
 
-            // 6. Формирование кадра парктроника (CAN ID 0x399)
-            byte[] activePayload = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            PASSTHRU_MSG sonarMsg = CreateCanMsg(0x399, activePayload);
+            // Начальное состояние — ON (0x01)
+            byte currentStatusByte = 0x01;
+            PASSTHRU_MSG sonarMsg = CreateCanMsg(0x399, new byte[] { currentStatusByte, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
 
-            // 7. Запуск фоновой отправки раз в 100 мс
+            // Запускаем первоначальный периодический кадр (интервал 100 мс)
             status = PassThruStartPeriodicMsg(channelId, ref sonarMsg, out periodicMsgId, 100);
             CheckStatus(status, "PassThruStartPeriodicMsg");
 
-            Console.WriteLine("\n[УСПЕХ] Статус (ON / Зелёная иконка) отправляется в шину CAN.");
-            Console.WriteLine("Нажмите Enter для завершения...");
-            Console.ReadLine();
+            Console.Clear();
+            PrintControlMenu();
+            Log("[+] Интерактивный режим активирован. Текущий режим: ON (Зеленый)");
 
-            PassThruStopPeriodicMsg(channelId, periodicMsgId);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"\n[-] Ошибка выполнения: {ex.Message}");
-            Console.ReadLine();
+            bool isRunning = true;
+
+            while (isRunning)
+            {
+                if (Console.KeyAvailable)
+                {
+                    ConsoleKeyInfo keyInfo = Console.ReadKey(intercept: true);
+
+                    byte newStatusByte = currentStatusByte;
+                    string modeName = "";
+
+                    switch (keyInfo.Key)
+                    {
+                        case ConsoleKey.D1:
+                        case ConsoleKey.NumPad1:
+                            newStatusByte = 0x01;
+                            modeName = "ON (Зелёный значок)";
+                            break;
+
+                        case ConsoleKey.D2:
+                        case ConsoleKey.NumPad2:
+                            newStatusByte = 0x00;
+                            modeName = "OFF (Отключен)";
+                            break;
+
+                        case ConsoleKey.D3:
+                        case ConsoleKey.NumPad3:
+                            newStatusByte = 0x02;
+                            modeName = "ERROR (Оранжевый / Ошибка сонаров)";
+                            break;
+
+                        case ConsoleKey.Escape:
+                            isRunning = false;
+                            continue;
+
+                        default:
+                            continue;
+                    }
+
+                    // Перезапускаем периодический кадр только если статус действительно изменился
+                    if (newStatusByte != currentStatusByte || periodicMsgId == 0)
+                    {
+                        currentStatusByte = newStatusByte;
+
+                        // Останавливаем старый периодический поток
+                        if (periodicMsgId != 0)
+                        {
+                            PassThruStopPeriodicMsg(channelId, periodicMsgId);
+                        }
+
+                        // Собираем кадр с новым байтом состояния
+                        PASSTHRU_MSG updatedMsg = CreateCanMsg(0x399, new byte[] { currentStatusByte, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+
+                        // Запускаем обновленный поток отправки
+                        status = PassThruStartPeriodicMsg(channelId, ref updatedMsg, out periodicMsgId, 100);
+                        if (status == 0)
+                        {
+                            Log($"[ВЫБОР] Режим изменен на: {modeName} [Байт 0: 0x{currentStatusByte:X2}]");
+                        }
+                        else
+                        {
+                            Log($"[-] Ошибка смены режима: Code {status}", isError: true);
+                        }
+                    }
+                }
+
+                Thread.Sleep(50); // Небольшая пауза для снижения нагрузки на ЦП
+            }
+
+            Log("\n[*] Остановка передачи кадра...");
+            if (periodicMsgId != 0) PassThruStopPeriodicMsg(channelId, periodicMsgId);
         }
         finally
         {
             if (channelId != 0) PassThruDisconnect(channelId);
             if (deviceId != 0) PassThruClose(deviceId);
-            Console.WriteLine("[+] Сессия завершена.");
+            Log("[+] Сессия J2534 корректно завершена.");
         }
     }
 
-    #region Registry Search Engine
+    private static void PrintControlMenu()
+    {
+        Console.WriteLine("==================================================");
+        Console.WriteLine("      LEXUS RX 200t — PARK ASSIST / SONAR TEST     ");
+        Console.WriteLine("==================================================");
+        Console.WriteLine(" Управление значком парктроника (кадр 0x399):");
+        Console.WriteLine("  [1] - Включить парктроник   (ON / Зелёный)");
+        Console.WriteLine("  [2] - Выключить парктроник  (OFF / Погашен)");
+        Console.WriteLine("  [3] - Вызвать ошибку        (ERROR / Оранжевый)");
+        Console.WriteLine("  [Esc] - Завершить работу и выйти");
+        Console.WriteLine("==================================================");
+    }
 
-    /// <summary>
-    /// Ищет зарегистрированный J2534 адаптер в реестре Windows.
-    /// </summary>
-    /// <param name="vendorFilter">Фильтр по имени (например "CHIPSOFT"). Если null — вернет первый попавшийся J2534.</param>
+    #region Logging & Error Handling
+
+    private static void Log(string message, bool isError = false)
+    {
+        string formattedLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
+
+        if (isError)
+            Console.ForegroundColor = ConsoleColor.Red;
+
+        Console.WriteLine(message);
+
+        if (isError)
+            Console.ResetColor();
+
+        try
+        {
+            File.AppendAllText(LogFilePath, formattedLine + Environment.NewLine);
+        }
+        catch { /* Игнорируем ошибки записи файла */ }
+    }
+
+    private static void CheckStatus(int status, string actionName)
+    {
+        if (status != 0)
+        {
+            string description = GetJ2534ErrorDescription(status);
+            throw new Exception($"{actionName} завершилась с ошибкой J2534 Code: {status} ({description})");
+        }
+    }
+
+    private static string GetJ2534ErrorDescription(int code)
+    {
+        return code switch
+        {
+            0x01 => "ERR_NOT_SUPPORTED",
+            0x02 => "ERR_INVALID_CHANNEL_ID",
+            0x03 => "ERR_INVALID_PROTOCOL_ID",
+            0x04 => "ERR_NULL_PARAMETER",
+            0x05 => "ERR_CONFIG_VALUE",
+            0x06 => "ERR_INVALID_DEVICE_ID",
+            0x07 => "ERR_DEVICE_NOT_CONNECTED (Адаптер не подключен по USB или выключено зажигание)",
+            0x08 => "ERR_TIMEOUT",
+            0x09 => "ERR_MSG_PROTOCOL_MISMATCH",
+            0x0A => "ERR_DEVICE_IN_USE (Адаптер занят другой программой)",
+            _ => $"UNKNOWN_ERROR ({code})"
+        };
+    }
+
+    #endregion
+
+    #region Registry Search & Helpers
+
     private static J2534DeviceInfo FindJ2534Device(string vendorFilter = null)
     {
         string[] searchPaths = new string[]
@@ -180,11 +318,8 @@ class Program
 
                 foreach (string subkeyName in baseKey.GetSubKeyNames())
                 {
-                    // Проверка фильтра производителя
                     if (!string.IsNullOrEmpty(vendorFilter) && !subkeyName.ToUpper().Contains(vendorFilter.ToUpper()))
-                    {
                         continue;
-                    }
 
                     using (RegistryKey deviceKey = baseKey.OpenSubKey(subkeyName))
                     {
@@ -195,23 +330,15 @@ class Program
 
                         if (!string.IsNullOrEmpty(dllPath) && File.Exists(dllPath))
                         {
-                            return new J2534DeviceInfo
-                            {
-                                Name = name,
-                                DllPath = dllPath
-                            };
+                            return new J2534DeviceInfo { Name = name, DllPath = dllPath };
                         }
                     }
                 }
             }
         }
 
-        throw new Exception($"Подходящий J2534-адаптер {(vendorFilter != null ? $"(\"{vendorFilter}\")" : "")} не найден в реестре Windows!");
+        throw new Exception($"Адаптер {(vendorFilter != null ? $"(\"{vendorFilter}\")" : "")} не найден в реестре!");
     }
-
-    #endregion
-
-    #region Helpers
 
     private static T GetDelegate<T>(IntPtr module, string name) where T : Delegate
     {
@@ -238,12 +365,6 @@ class Program
 
         Array.Copy(payload, 0, msg.Data, 4, payload.Length);
         return msg;
-    }
-
-    private static void CheckStatus(int status, string actionName)
-    {
-        if (status != 0)
-            throw new Exception($"{actionName} завершилась с ошибкой J2534 Code: {status}");
     }
 
     #endregion
